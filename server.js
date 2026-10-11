@@ -47,6 +47,7 @@ function detectProtection(text) {
 
 function parseCategory(lines, category) {
   const items = [];
+
   for (let i = 0; i < lines.length; i++) {
     const match = lines[i].match(/^Value\s*[-:]\s*(.+)$/i);
     if (!match) continue;
@@ -66,6 +67,7 @@ function parseCategory(lines, category) {
 
     if (name) items.push({ name, value: match[1], category });
   }
+
   return items;
 }
 
@@ -79,11 +81,17 @@ function escapeHtml(value) {
 
 async function checkCategory(category) {
   const url = `${BASE_URL}/${category}`;
+
   try {
     const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; MM2ValuesTest/1.0)" },
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
       signal: AbortSignal.timeout(20000),
     });
+
     const body = await response.text();
     const lines = htmlToLines(body);
     const protectedPage = detectProtection(body);
@@ -91,16 +99,19 @@ async function checkCategory(category) {
 
     return {
       category,
+      url,
       status: response.status,
       contentType: response.headers.get("content-type") || "unknown",
       protectedPage,
       itemCount: items.length,
       items,
+      // Небольшой фрагмент ответа нужен для диагностики в логах хостинга.
       preview: lines.slice(0, 6).join(" | ").slice(0, 400),
     };
   } catch (error) {
     return {
       category,
+      url,
       status: 0,
       contentType: "",
       protectedPage: false,
@@ -116,31 +127,57 @@ let resultCache = null;
 
 async function getResults() {
   if (resultCache) return resultCache;
+
   resultCache = await Promise.all(CATEGORIES.map(checkCategory));
+
+  // Сводка будет видна в консоли/логах панели хостинга.
+  // Полный список цен в лог не выводится.
+  const diagnostics = resultCache.map(({ category, url, status, contentType, protectedPage, itemCount, error, preview }) => ({
+    category,
+    url,
+    status,
+    contentType,
+    protectedPage,
+    itemCount,
+    error: error || null,
+    preview,
+  }));
+  console.log("[scraper] Fetch diagnostics:\n" + JSON.stringify(diagnostics, null, 2));
+
   return resultCache;
 }
 
 function render(results) {
   const items = results.flatMap(result => result.items);
-  if (items.length) return items.map(item => `${item.name}:${item.value}`).join("\n");
 
-  const errors = results.filter(result => result.error || result.protectedPage);
-  if (errors.length) return "Не удалось получить цены: сайт вернул ошибку или страницу проверки безопасности.";
-  return "Не удалось распознать цены на страницах сайта.";
+  if (items.length) {
+    return items.map(item => `${escapeHtml(item.name)}:${escapeHtml(item.value)}`).join("\n");
+  }
+
+  const errors = results.filter(result => result.error || result.protectedPage || result.status >= 400);
+  if (errors.length) {
+    return "Не удалось получить цены: проверьте HTTP-статус и текст ошибки в логах сервера.";
+  }
+
+  return "Не удалось распознать цены на страницах сайта. Смотрите preview в логах сервера.";
 }
 
 const server = http.createServer(async (_req, res) => {
   try {
     const results = await getResults();
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" });
+    res.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    });
     res.end(render(results));
   } catch (error) {
+    console.error("[server] Request handler error:", error);
     res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(error.message || String(error));
   }
 });
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Local test page: http://localhost:${PORT}`);
-  console.log("Open it in your browser after this message.");
+  console.log(`[server] Listening on 0.0.0.0:${PORT}`);
+  console.log(`[server] Local test page: http://localhost:${PORT}`);
 });
